@@ -243,7 +243,7 @@ checkBashisms = ForShell [Sh, Dash] $ \t -> do
         when (isBashVariable var) $
                     warnMsg id $ var ++ " is"
       where
-        str = bracedString t
+        str = concat $ oversimplify token
         var = getBracedReference str
         check (regex, feature) =
             when (isJust $ matchRegex regex str) $ warnMsg id feature
@@ -289,10 +289,11 @@ checkBashisms = ForShell [Sh, Dash] $ \t -> do
         -- Get the literal options from a list of arguments,
         -- up until the first non-literal one
         getLiteralArgs :: [Token] -> [(Id, String)]
-        getLiteralArgs (first:rest) = fromMaybe [] $ do
-            str <- getLiteralString first
-            return $ (getId first, str) : getLiteralArgs rest
-        getLiteralArgs [] = []
+        getLiteralArgs = foldr go []
+          where
+            go first rest = case getLiteralString first of
+                Just str -> (getId first, str) : rest
+                Nothing -> []
 
         -- Check a flag-option pair (such as -o errexit)
         checkOptions (flag@(fid,flag') : opt@(oid,opt') : rest)
@@ -390,11 +391,10 @@ checkBashisms = ForShell [Sh, Dash] $ \t -> do
             ("unset", Just ["f", "v"]),
             ("wait", Just [])
             ]
-    bashism t@(T_SourceCommand id src _) =
-        let name = fromMaybe "" $ getCommandName src
-        in when (name == "source") $ warnMsg id "'source' in place of '.' is"
-    bashism (TA_Expansion _ (T_Literal id str : _)) | str `matches` radix =
-        when (str `matches` radix) $ warnMsg id "arithmetic base conversion is"
+    bashism t@(T_SourceCommand id src _)
+        | getCommandName src == Just "source" = warnMsg id "'source' in place of '.' is"
+    bashism (TA_Expansion _ (T_Literal id str : _))
+        | str `matches` radix = warnMsg id "arithmetic base conversion is"
       where
         radix = mkRegex "^[0-9]+#"
     bashism _ = return ()
@@ -506,13 +506,13 @@ checkMultiDimensionalArrays = ForShell [Bash] f
         case token of
             T_Assignment _ _ name (first:second:_) _ -> about second
             T_IndexedElement _ (first:second:_) _ -> about second
-            T_DollarBraced {} ->
-                when (isMultiDim token) $ about token
+            T_DollarBraced _ _ l ->
+                when (isMultiDim l) $ about token
             _ -> return ()
     about t = warn (getId t) 2180 "Bash does not support multidimensional arrays. Use 1D or associative arrays."
 
     re = mkRegex "^\\[.*\\]\\[.*\\]"  -- Fixme, this matches ${foo:- [][]} and such as well
-    isMultiDim t = getBracedModifier (bracedString t) `matches` re
+    isMultiDim l = getBracedModifier (concat $ oversimplify l) `matches` re
 
 prop_checkPS11 = verify checkPS1Assignments "PS1='\\033[1;35m\\$ '"
 prop_checkPS11a= verify checkPS1Assignments "export PS1='\\033[1;35m\\$ '"

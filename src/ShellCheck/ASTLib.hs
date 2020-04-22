@@ -134,13 +134,9 @@ isUnquotedFlag token = fromMaybe False $ do
     str <- getLeadingUnquotedString token
     return $ "-" `isPrefixOf` str
 
--- Given a T_DollarBraced, return a simplified version of the string contents.
-bracedString (T_DollarBraced _ _ l) = concat $ oversimplify l
-bracedString _ = error "Internal shellcheck error, please report! (bracedString on non-variable)"
-
 -- Is this an expansion of multiple items of an array?
-isArrayExpansion t@(T_DollarBraced _ _ _) =
-    let string = bracedString t in
+isArrayExpansion (T_DollarBraced _ _ l) =
+    let string = concat $ oversimplify l in
         "@" `isPrefixOf` string ||
             not ("#" `isPrefixOf` string) && "[@]" `isInfixOf` string
 isArrayExpansion _ = False
@@ -148,8 +144,8 @@ isArrayExpansion _ = False
 -- Is it possible that this arg becomes multiple args?
 mayBecomeMultipleArgs t = willBecomeMultipleArgs t || f t
   where
-    f t@(T_DollarBraced _ _ _) =
-        let string = bracedString t in
+    f (T_DollarBraced _ _ l) =
+        let string = concat $ oversimplify l in
             "!" `isPrefixOf` string
     f (T_DoubleQuoted _ parts) = any f parts
     f (T_NormalWord _ parts) = any f parts
@@ -317,13 +313,11 @@ getCommandNameAndToken :: Token -> (Maybe String, Token)
 getCommandNameAndToken t = fromMaybe (Nothing, t) $ do
     (T_SimpleCommand _ _ (w:rest)) <- getCommand t
     s <- getLiteralString w
-    if "busybox" `isSuffixOf` s || "builtin" == s
-        then
-            case rest of
-                (applet:_) -> return (getLiteralString applet, applet)
-                _ -> return (Just s, w)
-        else
-            return (Just s, w)
+    return $ case rest of
+        (applet:_) | "busybox" `isSuffixOf` s || "builtin" == s ->
+            (getLiteralString applet, applet)
+        _ ->
+            (Just s, w)
 
 
 -- If a command substitution is a single command, get its name.
@@ -400,10 +394,10 @@ getAssociativeArrays t =
     f t@T_SimpleCommand {} = sequence_ $ do
         name <- getCommandName t
         let assocNames = ["declare","local","typeset"]
-        guard $ elem name assocNames
+        guard $ name `elem` assocNames
         let flags = getAllFlags t
-        guard $ elem "A" $ map snd flags
-        let args = map fst . filter ((==) "" . snd) $ flags
+        guard $ "A" `elem` map snd flags
+        let args = [arg | (arg, "") <- flags]
         let names = mapMaybe (getLiteralStringExt nameAssignments) args
         return $ tell names
     f _ = return ()
@@ -421,25 +415,18 @@ data PseudoGlob = PGAny | PGMany | PGChar Char
 
 -- Turn a word into a PG pattern, replacing all unknown/runtime values with
 -- PGMany.
-wordToPseudoGlob :: Token -> Maybe [PseudoGlob]
+wordToPseudoGlob :: Token -> [PseudoGlob]
 wordToPseudoGlob word =
-    simplifyPseudoGlob . concat <$> mapM f (getWordParts word)
+    simplifyPseudoGlob . concatMap f $ getWordParts word
   where
     f x = case x of
-        T_Literal _ s -> return $ map PGChar s
-        T_SingleQuoted _ s -> return $ map PGChar s
+        T_Literal _ s -> map PGChar s
+        T_SingleQuoted _ s -> map PGChar s
 
-        T_DollarBraced {} -> return [PGMany]
-        T_DollarExpansion {} -> return [PGMany]
-        T_Backticked {} -> return [PGMany]
+        T_Glob _ "?" -> [PGAny]
+        T_Glob _ ('[':_)  -> [PGAny]
 
-        T_Glob _ "?" -> return [PGAny]
-        T_Glob _ ('[':_)  -> return [PGAny]
-        T_Glob {} -> return [PGMany]
-
-        T_Extglob {} -> return [PGMany]
-
-        _ -> return [PGMany]
+        _ -> [PGMany]
 
 -- Turn a word into a PG pattern, but only if we can preserve
 -- exact semantics.
@@ -502,8 +489,7 @@ pseudoGlobIsSuperSetof = matchable
     matchable (PGMany : rest) [] = matchable rest []
     matchable _ _ = False
 
-wordsCanBeEqual x y = fromMaybe True $
-    liftM2 pseudoGlobsCanOverlap (wordToPseudoGlob x) (wordToPseudoGlob y)
+wordsCanBeEqual x y = pseudoGlobsCanOverlap (wordToPseudoGlob x) (wordToPseudoGlob y)
 
 -- Is this an expansion that can be quoted,
 -- e.g. $(foo) `foo` $foo (but not {foo,})?
