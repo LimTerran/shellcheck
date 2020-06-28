@@ -253,7 +253,11 @@ ignoreProblemsOf p = do
 shouldIgnoreCode code = do
     context <- getCurrentContexts
     checkSourced <- Mr.asks checkSourced
-    return $ any (disabling checkSourced) context
+    return $ any (contextItemDisablesCode checkSourced code) context
+
+-- Does this item on the context stack disable warnings for 'code'?
+contextItemDisablesCode :: Bool -> Integer -> Context -> Bool
+contextItemDisablesCode alsoCheckSourced code = disabling alsoCheckSourced
   where
     disabling checkSourced item =
         case item of
@@ -262,6 +266,8 @@ shouldIgnoreCode code = do
             _ -> False
     disabling' (DisableComment n) = code == n
     disabling' _ = False
+
+
 
 getCurrentAnnotations includeSource =
     concatMap get . takeWhile (not . isBoundary) <$> getCurrentContexts
@@ -2123,7 +2129,7 @@ readSource t@(T_Redirecting _ _ (T_SimpleCommand cmdId _ (cmd:file':rest'))) = d
     case literalFile of
         Nothing -> do
             parseNoteAtId (getId file) WarningC 1090
-                "Can't follow non-constant source. Use a directive to specify location."
+                "ShellCheck can't follow non-constant source. Use a directive to specify location."
             return t
         Just filename -> do
             proceed <- shouldFollow filename
@@ -2622,7 +2628,7 @@ readFunctionDefinition = called "function" $ do
 
         readWithoutFunction = try $ do
             name <- many1 functionChars
-            guard $ name /= "time"  -- Interfers with time ( foo )
+            guard $ name /= "time"  -- Interferes with time ( foo )
             spacing
             readParens
             return $ \id -> T_Function id (FunctionKeyword False) (FunctionParentheses True) name
@@ -3313,16 +3319,21 @@ parseShell env name contents = do
                 prRoot = Just $
                     reattachHereDocs script (hereDocMap userstate)
             }
-        Left err ->
+        Left err -> do
+            let context = contextStack state
             return newParseResult {
                 prComments =
                     map toPositionedComment $
-                        notesForContext (contextStack state)
-                        ++ [makeErrorFor err]
+                        (filter (not . isIgnored context) $
+                            notesForContext context
+                            ++ [makeErrorFor err])
                         ++ parseProblems state,
                 prTokenPositions = Map.empty,
                 prRoot = Nothing
             }
+  where
+    -- A final pass for ignoring parse errors after failed parsing
+    isIgnored stack note = any (contextItemDisablesCode False (codeForParseNote note)) stack
 
 notesForContext list = zipWith ($) [first, second] $ filter isName list
   where
